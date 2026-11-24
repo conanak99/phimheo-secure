@@ -8,11 +8,13 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
+    "start": "HOST=0.0.0.0 PORT=${PORT:-4321} node ./dist/server/entry.mjs",
     "preview": "astro preview",
     "astro": "astro",
     "db:up": "docker compose up -d",
     "db:push": "drizzle-kit push",
     "db:seed": "tsx scripts/seed.ts",
+    "db:bootstrap": "tsx scripts/bootstrap-db.ts",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
