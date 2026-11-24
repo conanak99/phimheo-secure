@@ -1,0 +1,352 @@
+---
+import { eq } from 'drizzle-orm';
+import { db } from '../db';
+import { users } from '../db/schema';
+import Layout from '../layouts/Layout.astro';
+import { createSession } from '../lib/auth';
+import { verifyPassword } from '../lib/password';
+import { getAdminDashboardData } from '../lib/queries';
+
+let user = Astro.locals.user;
+let error = '';
+let emailValue = '';
+
+if (Astro.request.method === 'POST' && !user?.isAdmin) {
+  const formData = await Astro.request.formData();
+  const email = (formData.get('email')?.toString() ?? '').trim().toLowerCase();
+  const password = formData.get('password')?.toString() ?? '';
+  emailValue = email;
+
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+
+  const valid =
+    existing &&
+    existing.isAdmin &&
+    (await verifyPassword(password, existing.passwordHash));
+
+  if (!valid || !existing) {
+    error = 'Email hoặc mật khẩu quản trị không đúng.';
+  } else {
+    await createSession(existing.id, Astro.cookies);
+    return Astro.redirect('/admin');
+  }
+}
+
+const requestedTab = Astro.url.searchParams.get('tab');
+const tab: 'videos' | 'users' | 'comments' =
+  requestedTab === 'users' || requestedTab === 'comments'
+    ? requestedTab
+    : 'videos';
+
+// Only fetch admin data after server-side admin verification!
+const dashboard = user?.isAdmin ? await getAdminDashboardData() : null;
+---
+
+<Layout title="Quản trị · OnlyHeo">
+  {
+    !dashboard ? (
+      <div class="mx-auto grid min-h-[72vh] max-w-md place-items-center px-4 py-14">
+        <form method="POST" action="/admin" class="card w-full p-7 shadow-2xl">
+          <div class="grid h-12 w-12 place-items-center rounded-xl bg-red-400/10 text-2xl">
+            🛡️
+          </div>
+          <p class="mt-6 text-xs font-bold uppercase tracking-widest text-red-600">
+            Khu vực giới hạn
+          </p>
+          <h1 class="mt-2 text-3xl font-bold text-slate-900">
+            Đăng nhập quản trị
+          </h1>
+          <p class="mt-2 text-sm text-slate-500">
+            Quản lý nội dung và thành viên OnlyHeo.
+          </p>
+          <div class="mt-6">
+            <label for="admin-email" class="label">
+              Email quản trị
+            </label>
+            <input
+              id="admin-email"
+              name="email"
+              type="email"
+              class="input"
+              value={emailValue}
+              autocomplete="email"
+              required
+            />
+          </div>
+          <div class="mt-4">
+            <label for="admin-password" class="label">
+              Mật khẩu
+            </label>
+            <input
+              id="admin-password"
+              name="password"
+              type="password"
+              class="input"
+              autocomplete="current-password"
+              required
+            />
+          </div>
+          {error && (
+            <p class="mt-4 rounded bg-red-50 p-3 text-sm text-red-600">
+              {error}
+            </p>
+          )}
+          <button type="submit" class="btn-primary mt-6 w-full py-3">
+            Mở bảng điều khiển
+          </button>
+        </form>
+      </div>
+    ) : (
+      <div class="mx-auto max-w-7xl px-4 py-10 sm:px-6">
+        <div class="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+          <div>
+            <p class="text-xs font-bold uppercase tracking-widest text-brand">
+              Quản trị OnlyHeo
+            </p>
+            <h1 class="mt-2 text-3xl font-bold text-slate-900">
+              Bảng điều khiển nội dung
+            </h1>
+            <p class="mt-2 text-sm text-slate-500">
+              Mọi quyền quản trị được xác thực phía máy chủ qua phiên HttpOnly.
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <a href={`/admin?tab=${tab}`} class="btn-ghost">
+              Làm mới dữ liệu
+            </a>
+            <form method="POST" action="/api/auth/logout">
+              <button type="submit" class="btn-ghost">
+                Khóa bảng điều khiển
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <div class="mt-8 flex gap-2 border-b border-edge">
+          <a
+            href="/admin?tab=videos"
+            class={`border-b-2 px-4 py-3 text-sm font-semibold ${
+              tab === 'videos'
+                ? 'border-brand text-brand'
+                : 'border-transparent text-slate-500 hover:text-slate-900'
+            }`}
+          >
+            Video ({dashboard.videos.length})
+          </a>
+          <a
+            href="/admin?tab=users"
+            class={`border-b-2 px-4 py-3 text-sm font-semibold ${
+              tab === 'users'
+                ? 'border-brand text-brand'
+                : 'border-transparent text-slate-500 hover:text-slate-900'
+            }`}
+          >
+            Người dùng ({dashboard.users.length})
+          </a>
+          <a
+            href="/admin?tab=comments"
+            class={`border-b-2 px-4 py-3 text-sm font-semibold ${
+              tab === 'comments'
+                ? 'border-brand text-brand'
+                : 'border-transparent text-slate-500 hover:text-slate-900'
+            }`}
+          >
+            Bình luận ({dashboard.comments.length})
+          </a>
+        </div>
+
+        <div class="mt-6 overflow-x-auto rounded-xl border border-edge">
+          {tab === 'videos' && (
+            <table class="w-full min-w-[760px] text-left text-sm">
+              <thead class="bg-edge/50 text-xs uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th class="px-5 py-3">Video</th>
+                  <th class="px-5 py-3">Tệp nguồn</th>
+                  <th class="px-5 py-3">Quyền xem</th>
+                  <th class="px-5 py-3 text-right">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-edge">
+                {dashboard.videos.map((video) => (
+                  <tr class="bg-panel">
+                    <td class="px-5 py-4">
+                      <div class="flex items-center gap-3">
+                        <img
+                          src={video.thumbnailUrl}
+                          alt=""
+                          loading="lazy"
+                          class="h-12 w-20 rounded-md object-cover"
+                        />
+                        <a
+                          href={`/videos/${video.id}`}
+                          class="font-medium text-slate-900 hover:text-brand"
+                        >
+                          {video.title}
+                        </a>
+                      </div>
+                    </td>
+                    <td class="max-w-xs truncate px-5 py-4 font-mono text-xs text-slate-500">
+                      {video.videoFilename}
+                    </td>
+                    <td class="px-5 py-4">
+                      <form
+                        method="POST"
+                        action={`/api/admin/videos/${video.id}`}
+                      >
+                        <input
+                          type="hidden"
+                          name="action"
+                          value="toggle-premium"
+                        />
+                        <input
+                          type="hidden"
+                          name="returnTo"
+                          value="/admin?tab=videos"
+                        />
+                        <button
+                          type="submit"
+                          class={`cursor-pointer rounded px-2 py-1 text-xs font-bold ${
+                            video.isPremiumOnly
+                              ? 'bg-brand/15 text-brand'
+                              : 'bg-emerald-50 text-emerald-700'
+                          }`}
+                        >
+                          {video.isPremiumOnly ? 'Heo VIP' : 'Miễn phí'}
+                        </button>
+                      </form>
+                    </td>
+                    <td class="px-5 py-4 text-right">
+                      <form
+                        method="POST"
+                        action={`/api/admin/videos/${video.id}`}
+                      >
+                        <input type="hidden" name="action" value="delete" />
+                        <input
+                          type="hidden"
+                          name="returnTo"
+                          value="/admin?tab=videos"
+                        />
+                        <button
+                          type="submit"
+                          class="cursor-pointer text-xs text-red-600 hover:text-red-700"
+                        >
+                          Xóa
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {tab === 'users' && (
+            <table class="w-full min-w-[760px] text-left text-sm">
+              <thead class="bg-edge/50 text-xs uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th class="px-5 py-3">Người dùng</th>
+                  <th class="px-5 py-3">Vai trò</th>
+                  <th class="px-5 py-3">Gói thành viên</th>
+                  <th class="px-5 py-3 text-right">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-edge">
+                {dashboard.users.map((u) => (
+                  <tr class="bg-panel">
+                    <td class="px-5 py-4">
+                      <p class="font-medium text-slate-900">{u.username}</p>
+                      <p class="text-xs text-slate-500">{u.email}</p>
+                    </td>
+                    <td class="px-5 py-4 text-xs text-slate-600">
+                      {u.isAdmin ? 'Quản trị viên' : 'Thành viên'}
+                    </td>
+                    <td class="px-5 py-4">
+                      <form method="POST" action={`/api/admin/users/${u.id}`}>
+                        <input
+                          type="hidden"
+                          name="action"
+                          value="toggle-premium"
+                        />
+                        <button
+                          type="submit"
+                          class="cursor-pointer text-xs text-brand hover:underline"
+                        >
+                          {u.isPremium ? 'Heo VIP' : 'Miễn phí'}
+                        </button>
+                      </form>
+                    </td>
+                    <td class="px-5 py-4 text-right">
+                      {u.id !== user?.id ? (
+                        <form method="POST" action={`/api/admin/users/${u.id}`}>
+                          <input type="hidden" name="action" value="delete" />
+                          <button
+                            type="submit"
+                            class="cursor-pointer text-xs text-red-600"
+                          >
+                            Xóa
+                          </button>
+                        </form>
+                      ) : (
+                        <span class="text-xs text-slate-400">Hiện tại</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {tab === 'comments' && (
+            <table class="w-full min-w-[760px] text-left text-sm">
+              <thead class="bg-edge/50 text-xs uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th class="px-5 py-3">ID</th>
+                  <th class="px-5 py-3">ID người dùng</th>
+                  <th class="px-5 py-3">Nội dung</th>
+                  <th class="px-5 py-3 text-right">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-edge">
+                {dashboard.comments.map((comment) => (
+                  <tr class="bg-panel">
+                    <td class="px-5 py-4 font-mono text-xs text-slate-500">
+                      {comment.id}
+                    </td>
+                    <td class="px-5 py-4 font-mono text-xs text-slate-500">
+                      {comment.userId}
+                    </td>
+                    <td class="max-w-md truncate px-5 py-4 text-slate-700">
+                      {comment.content}
+                    </td>
+                    <td class="px-5 py-4 text-right">
+                      <form
+                        method="POST"
+                        action={`/api/comments/${comment.id}/delete`}
+                      >
+                        <input
+                          type="hidden"
+                          name="returnTo"
+                          value="/admin?tab=comments"
+                        />
+                        <button
+                          type="submit"
+                          class="cursor-pointer text-xs text-red-600"
+                        >
+                          Xóa
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    )
+  }
+</Layout>

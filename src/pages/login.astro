@@ -1,0 +1,207 @@
+---
+import { eq } from 'drizzle-orm';
+import { db } from '../db';
+import { users } from '../db/schema';
+import Layout from '../layouts/Layout.astro';
+import { createSession, sanitizeReturnTo } from '../lib/auth';
+import { hashPassword, verifyPassword } from '../lib/password';
+
+const returnTo = sanitizeReturnTo(Astro.url.searchParams.get('from'), '/profile');
+
+if (Astro.locals.user) {
+  return Astro.redirect(returnTo);
+}
+
+let mode: 'login' | 'register' =
+  Astro.url.searchParams.get('mode') === 'register' ? 'register' : 'login';
+let error = '';
+let emailValue = '';
+let usernameValue = '';
+
+if (Astro.request.method === 'POST') {
+  const formData = await Astro.request.formData();
+  const submittedMode = formData.get('mode')?.toString();
+  mode = submittedMode === 'register' ? 'register' : 'login';
+
+  const submittedReturnTo = sanitizeReturnTo(
+    formData.get('from')?.toString(),
+    '/profile',
+  );
+  const email = (formData.get('email')?.toString() ?? '').trim().toLowerCase();
+  const password = formData.get('password')?.toString() ?? '';
+  const username = (formData.get('username')?.toString() ?? '').trim();
+
+  emailValue = email;
+  usernameValue = username;
+
+  if (mode === 'login') {
+    const [existing] = await db
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+
+    const valid =
+      existing && (await verifyPassword(password, existing.passwordHash));
+
+    if (!valid || !existing) {
+      error = 'Email hoặc mật khẩu không chính xác.';
+    } else {
+      await createSession(existing.id, Astro.cookies);
+      return Astro.redirect(submittedReturnTo);
+    }
+  } else {
+    if (username.length < 2 || username.length > 40) {
+      error = 'Tên người dùng phải có từ 2 đến 40 ký tự.';
+    } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      error = 'Email không hợp lệ.';
+    } else if (password.length < 6 || password.length > 128) {
+      error = 'Mật khẩu phải có từ 6 đến 128 ký tự.';
+    } else {
+      const [duplicate] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
+
+      if (duplicate) {
+        error = 'Email này đã được đăng ký.';
+      } else {
+        const passwordHash = await hashPassword(password);
+        const [created] = await db
+          .insert(users)
+          .values({
+            username,
+            email,
+            passwordHash,
+            bio: '',
+            isPremium: false,
+            isAdmin: false,
+          })
+          .returning({ id: users.id });
+
+        if (created) {
+          await createSession(created.id, Astro.cookies);
+          return Astro.redirect(submittedReturnTo);
+        }
+        error = 'Không thể tạo tài khoản.';
+      }
+    }
+  }
+}
+
+const fromQuery = returnTo !== '/profile' ? `&from=${encodeURIComponent(returnTo)}` : '';
+---
+
+<Layout title={mode === 'login' ? 'Đăng nhập · OnlyHeo' : 'Đăng ký · OnlyHeo'}>
+  <div class="mx-auto grid min-h-[72vh] max-w-5xl place-items-center px-4 py-14">
+    <div
+      class="grid w-full overflow-hidden rounded-2xl border border-edge bg-panel shadow-2xl md:grid-cols-2"
+    >
+      <div
+        class="hidden bg-gradient-to-br from-[#00aff0] via-[#39c2f5] to-[#ff91bb] p-10 md:flex md:flex-col md:justify-between"
+      >
+        <div class="text-7xl">🐷</div>
+        <div>
+          <h2 class="text-3xl font-extrabold text-white">
+            Các bé heo đang nằm chờ.
+          </h2>
+          <p class="mt-3 leading-7 text-white/90">
+            Đăng nhập để xem heo không che… watermark. Bé nào cũng đã sẵn sàng,
+            chỉ chờ bạn bấm play.
+          </p>
+        </div>
+      </div>
+
+      <div class="p-7 sm:p-10">
+        <p class="text-xs font-bold uppercase tracking-widest text-brand">
+          Tài khoản OnlyHeo
+        </p>
+        <h1 class="mt-2 text-3xl font-bold text-slate-900">
+          {mode === 'login' ? 'Chào mừng trở lại' : 'Tạo tài khoản mới'}
+        </h1>
+
+        <div class="mt-6 flex rounded-lg bg-ink p-1">
+          <a
+            href={`/login?mode=login${fromQuery}`}
+            class={`flex-1 rounded-md py-2 text-center text-sm font-semibold ${
+              mode === 'login'
+                ? 'bg-white text-brand shadow-sm'
+                : 'text-slate-500'
+            }`}
+          >
+            Đăng nhập
+          </a>
+          <a
+            href={`/login?mode=register${fromQuery}`}
+            class={`flex-1 rounded-md py-2 text-center text-sm font-semibold ${
+              mode === 'register'
+                ? 'bg-white text-brand shadow-sm'
+                : 'text-slate-500'
+            }`}
+          >
+            Đăng ký
+          </a>
+        </div>
+
+        <form method="POST" action="/login" class="mt-6 space-y-4">
+          <input type="hidden" name="mode" value={mode} />
+          <input type="hidden" name="from" value={returnTo} />
+          {
+            mode === 'register' && (
+              <div>
+                <label for="username" class="label">
+                  Tên người dùng
+                </label>
+                <input
+                  id="username"
+                  name="username"
+                  class="input"
+                  value={usernameValue}
+                  minlength={2}
+                  maxlength={40}
+                  required
+                />
+              </div>
+            )
+          }
+          <div>
+            <label for="email" class="label"> Email </label>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              class="input"
+              value={emailValue}
+              autocomplete="email"
+              required
+            />
+          </div>
+          <div>
+            <label for="password" class="label"> Mật khẩu </label>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              class="input"
+              autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
+              minlength={6}
+              maxlength={128}
+              required
+            />
+          </div>
+          {
+            error && (
+              <p class="rounded-lg bg-red-50 p-3 text-sm text-red-600">
+                {error}
+              </p>
+            )
+          }
+          <button type="submit" class="btn-primary w-full py-3">
+            {mode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</Layout>

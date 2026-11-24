@@ -1,0 +1,299 @@
+---
+import { db } from '../../db';
+import { comments as commentsTable } from '../../db/schema';
+import Layout from '../../layouts/Layout.astro';
+import {
+  getCommentsForVideo,
+  getFullVideoById,
+  getPublicVideoById,
+} from '../../lib/queries';
+
+const id = Astro.params.id ?? '';
+const user = Astro.locals.user;
+
+let commentError = '';
+
+const video = user?.isAdmin
+  ? await getFullVideoById(id)
+  : await getPublicVideoById(id);
+
+if (Astro.request.method === 'POST' && video) {
+  if (!user) {
+    return Astro.redirect(`/login?from=${encodeURIComponent(Astro.url.pathname)}`);
+  }
+
+  const formData = await Astro.request.formData();
+  const content = formData.get('content')?.toString().trim() ?? '';
+
+  if (!content) {
+    commentError = 'Vui lòng nhập nội dung bình luận.';
+  } else if (content.length > 1000) {
+    commentError = 'Bình luận tối đa 1000 ký tự.';
+  } else {
+    await db.insert(commentsTable).values({
+      videoId: video.id,
+      userId: user.id,
+      content,
+    });
+    return Astro.redirect(`/videos/${video.id}#comments`);
+  }
+}
+
+const comments = video ? await getCommentsForVideo(video.id) : [];
+
+if (!video) {
+  Astro.response.status = 404;
+}
+
+const compactNumber = new Intl.NumberFormat('vi-VN', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+
+const locked = Boolean(video?.isPremiumOnly && !user?.isPremium && !user?.isAdmin);
+const adminVideoFilename =
+  user?.isAdmin && video && 'videoFilename' in video
+    ? video.videoFilename
+    : null;
+---
+
+<Layout title={video ? `${video.title} · OnlyHeo` : 'Video không tồn tại · OnlyHeo'}>
+  {
+    !video ? (
+      <div class="mx-auto max-w-3xl px-4 py-20 text-center">
+        <div class="text-6xl">🐷</div>
+        <h1 class="mt-5 text-3xl font-bold text-slate-900">
+          Video không tồn tại
+        </h1>
+        <p class="mt-2 text-slate-500">
+          Đường dẫn này không dẫn tới bé heo nào cả.
+        </p>
+        <a href="/" class="btn-primary mt-7">
+          Quay lại kho video
+        </a>
+      </div>
+    ) : (
+      <div class="mx-auto max-w-6xl px-4 py-10 sm:px-6">
+        <a href="/" class="text-sm text-slate-500 hover:text-brand">
+          ← Quay lại kho video
+        </a>
+
+        <div class="relative mt-5 overflow-hidden rounded-2xl border border-edge bg-black">
+          {locked ? (
+            <div class="relative aspect-video w-full overflow-hidden">
+              <img
+                src={video.thumbnailUrl}
+                alt=""
+                class="premium-locked h-full w-full object-cover"
+              />
+              <div class="premium-veil">
+                <span class="text-4xl">🔒</span>
+                <h2 class="text-2xl font-bold text-slate-900">
+                  Chúng tôi đã che cảnh nóng này
+                </h2>
+                <p class="max-w-sm text-sm text-slate-600">
+                  Bên dưới lớp mờ này là 4K không che. Nâng cấp để nhìn cho rõ.
+                </p>
+                <a
+                  href={
+                    user
+                      ? '/checkout'
+                      : `/login?from=${encodeURIComponent(Astro.url.pathname)}`
+                  }
+                  class="btn-primary"
+                >
+                  Mở khóa Heo VIP
+                </a>
+              </div>
+            </div>
+          ) : (
+            <video
+              class="aspect-video w-full"
+              controls
+              poster={video.thumbnailUrl}
+              src={`/api/videos/${video.id}/stream`}
+            />
+          )}
+        </div>
+
+        <div class="mt-7 grid gap-8 lg:grid-cols-[1fr_280px]">
+          <div>
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-bold text-slate-900">{video.title}</h1>
+                <p class="mt-2 text-sm text-slate-500">
+                  {compactNumber.format(video.views)} lượt xem · {video.duration}
+                </p>
+              </div>
+              {video.isPremiumOnly && (
+                <span class="rounded bg-brand px-2 py-1 text-xs font-extrabold text-white">
+                  HEO VIP
+                </span>
+              )}
+            </div>
+            <p class="mt-5 leading-7 text-slate-700">{video.description}</p>
+
+            {user?.isAdmin && (
+              <div class="mt-4 flex flex-wrap items-center gap-2">
+                <form
+                  method="POST"
+                  action={`/api/admin/videos/${video.id}`}
+                  class="flex items-center gap-2"
+                >
+                  <input type="hidden" name="action" value="rename" />
+                  <input
+                    type="hidden"
+                    name="returnTo"
+                    value={`/videos/${video.id}`}
+                  />
+                  <input
+                    name="title"
+                    value={video.title}
+                    class="input w-64"
+                    aria-label="Tên video mới"
+                    required
+                  />
+                  <button type="submit" class="btn-ghost">
+                    Sửa video
+                  </button>
+                </form>
+                <form method="POST" action={`/api/admin/videos/${video.id}`}>
+                  <input type="hidden" name="action" value="delete" />
+                  <input type="hidden" name="returnTo" value="/" />
+                  <button type="submit" class="btn-ghost text-red-600">
+                    Xóa video
+                  </button>
+                </form>
+              </div>
+            )}
+
+            <section id="comments" class="mt-12 scroll-mt-24">
+              <h2 class="text-xl font-bold text-slate-900">
+                Bình luận ({comments.length})
+              </h2>
+
+              {user ? (
+                <form
+                  method="POST"
+                  action={`/videos/${video.id}`}
+                  class="card mt-5 scroll-mt-24 p-4"
+                >
+                  <label for="comment" class="label">
+                    Nói gì đó về bé heo
+                  </label>
+                  <textarea
+                    id="comment"
+                    name="content"
+                    rows={3}
+                    maxlength={1000}
+                    required
+                    class="input resize-none"
+                    placeholder="Thú nhận gu heo của bạn…"
+                  />
+                  {commentError && (
+                    <p class="mt-2 text-xs text-red-600">{commentError}</p>
+                  )}
+                  <div class="mt-3 flex items-center justify-end">
+                    <button class="btn-primary" type="submit">
+                      Đăng bình luận
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div class="card mt-5 p-5 text-sm text-slate-500">
+                  <a
+                    href={`/login?from=${encodeURIComponent(Astro.url.pathname)}`}
+                    class="font-semibold text-brand"
+                  >
+                    Đăng nhập
+                  </a>{' '}
+                  để viết bình luận.
+                </div>
+              )}
+
+              <div class="mt-6 space-y-4">
+                {comments.map((comment) => {
+                  const canDelete =
+                    user && (user.id === comment.userId || user.isAdmin);
+                  return (
+                    <article class="card p-5">
+                      <div class="flex items-start justify-between gap-4">
+                        <div class="flex gap-3">
+                          <span class="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-edge text-sm font-bold">
+                            {comment.author?.username
+                              .slice(0, 1)
+                              .toUpperCase() ?? '?'}
+                          </span>
+                          <div>
+                            <p class="text-sm font-semibold text-slate-900">
+                              {comment.author?.username ?? 'Người dùng đã xóa'}
+                            </p>
+                            <p class="mt-0.5 text-xs text-slate-500">
+                              {comment.author?.bio ?? ''}
+                            </p>
+                          </div>
+                        </div>
+                        {canDelete && (
+                          <form
+                            method="POST"
+                            action={`/api/comments/${comment.id}/delete`}
+                          >
+                            <input
+                              type="hidden"
+                              name="returnTo"
+                              value={`/videos/${video.id}#comments`}
+                            />
+                            <button
+                              type="submit"
+                              class="cursor-pointer text-xs text-slate-600 hover:text-red-500"
+                            >
+                              Xóa
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                      <p class="mt-4 whitespace-pre-wrap text-sm leading-6 text-slate-700">
+                        {comment.content}
+                      </p>
+                      <p class="mt-3 text-[11px] text-slate-600">
+                        {new Date(comment.createdAt).toLocaleString('vi-VN')}
+                      </p>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          </div>
+
+          <aside class="card h-fit p-5">
+            <p class="text-xs font-bold uppercase tracking-wider text-brand">
+              Thông tin video
+            </p>
+            <dl class="mt-4 space-y-4 text-sm">
+              <div>
+                <dt class="text-slate-500">Ngày đăng</dt>
+                <dd class="mt-1 text-slate-900">
+                  {new Date(video.createdAt).toLocaleDateString('vi-VN')}
+                </dd>
+              </div>
+              <div>
+                <dt class="text-slate-500">Quyền truy cập</dt>
+                <dd class="mt-1 text-slate-900">
+                  {video.isPremiumOnly ? 'Heo VIP' : 'Miễn phí'}
+                </dd>
+              </div>
+              {adminVideoFilename && (
+                <div>
+                  <dt class="text-slate-500">Tệp nguồn (Quản trị)</dt>
+                  <dd class="mt-1 break-all font-mono text-xs text-slate-700">
+                    storage/videos/{adminVideoFilename}
+                  </dd>
+                </div>
+              )}
+            </dl>
+          </aside>
+        </div>
+      </div>
+    )
+  }
+</Layout>

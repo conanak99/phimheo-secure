@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #f5f7fa;
+  --color-panel: #ffffff;
+  --color-edge: #dce3ea;
+  --color-brand: #00aff0;
+  --color-brandDeep: #008ccf;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+@layer base {
+  html {
+    scroll-padding-top: 6rem;
+    scroll-padding-bottom: 5rem;
+  }
+
+  body {
+    @apply bg-ink font-sans text-slate-700 antialiased;
+  }
+}
+
+@layer components {
+  .premium-locked {
+    filter: blur(14px);
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .premium-veil {
+    @apply absolute inset-0 z-10 flex flex-col items-center justify-center gap-3
+           bg-white/80 text-center backdrop-blur-sm;
+  }
+
+  .card {
+    @apply rounded-xl border border-edge bg-panel shadow-sm;
+  }
+
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg px-4 py-2
+           text-sm font-semibold transition disabled:cursor-not-allowed
+           disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg bg-brand px-4 py-2
+           text-sm font-semibold text-white transition hover:bg-brandDeep
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-edge bg-white px-4 py-2
+           text-sm font-semibold text-slate-700 transition hover:border-brand hover:text-brand
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-edge bg-white px-3 py-2 text-sm
+           text-slate-900 placeholder:text-slate-400 focus:border-brand
+           focus:outline-none focus:ring-2 focus:ring-brand/15;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500;
+  }
+}

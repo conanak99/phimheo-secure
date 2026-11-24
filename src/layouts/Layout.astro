@@ -1,0 +1,151 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title?: string;
+}
+
+const { title = 'OnlyHeo · Phim heo nóng nhất Việt Nam' } = Astro.props;
+const user = Astro.locals.user;
+const pathname = Astro.url.pathname;
+
+const isActive = (href: string, exact = false) =>
+  exact ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
+
+const navClass = (href: string, exact = false) =>
+  `text-sm font-medium transition ${
+    isActive(href, exact) ? 'text-brand' : 'text-slate-500 hover:text-slate-900'
+  }`;
+
+const mobileNavClass = (href: string, exact = false) =>
+  `flex min-w-0 flex-1 flex-col items-center gap-0.5 py-2 text-[11px] font-semibold transition ${
+    isActive(href, exact) ? 'text-brand' : 'text-slate-500'
+  }`;
+---
+
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#00aff0" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <title>{title}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="min-h-screen pb-16 md:pb-0">
+      <header class="sticky top-0 z-30 border-b border-edge bg-white/95 shadow-sm backdrop-blur">
+        <div class="mx-auto flex h-20 max-w-7xl items-center gap-8 px-4 sm:px-6">
+          <a href="/" class="flex items-center">
+            <img src="/logo.png" alt="OnlyHeo" class="h-12 w-auto" />
+          </a>
+
+          <nav class="hidden items-center gap-6 md:flex">
+            <a href="/" class={navClass('/', true)}>
+              Khám phá
+            </a>
+            <a href="/premium" class={navClass('/premium')}>
+              Heo VIP
+            </a>
+            {
+              user?.isAdmin && (
+                <a href="/admin" class={navClass('/admin')}>
+                  Quản trị
+                </a>
+              )
+            }
+          </nav>
+
+          <div class="ml-auto flex items-center gap-3">
+            {
+              user ? (
+                <>
+                  {!user.isPremium && (
+                    <a
+                      href="/checkout"
+                      class="btn-primary hidden sm:inline-flex"
+                    >
+                      Nâng cấp
+                    </a>
+                  )}
+                  <a href="/profile" class="btn-ghost">
+                    <span class="grid h-6 w-6 place-items-center rounded-full bg-edge text-xs">
+                      {user.username.slice(0, 1).toUpperCase()}
+                    </span>
+                    <span class="hidden sm:inline">{user.username}</span>
+                  </a>
+                  <form method="POST" action="/api/auth/logout">
+                    <button
+                      type="submit"
+                      class="cursor-pointer text-xs text-slate-500 hover:text-slate-900"
+                    >
+                      Đăng xuất
+                    </button>
+                  </form>
+                </>
+              ) : (
+                <a href="/login" class="btn-primary">
+                  Đăng nhập
+                </a>
+              )
+            }
+          </div>
+        </div>
+      </header>
+
+      <nav
+        aria-label="Điều hướng di động"
+        class="fixed inset-x-0 bottom-0 z-40 flex border-t border-edge bg-white/95 px-2 pb-[env(safe-area-inset-bottom)] shadow-[0_-4px_16px_rgba(15,23,42,0.08)] backdrop-blur md:hidden"
+      >
+        <a href="/" class={mobileNavClass('/', true)}>
+          <span class="text-lg">🐷</span>
+          Khám phá
+        </a>
+        <a href="/premium" class={mobileNavClass('/premium')}>
+          <span class="text-lg">★</span>
+          Heo VIP
+        </a>
+        {
+          user && !user.isPremium && (
+            <a href="/checkout" class={mobileNavClass('/checkout')}>
+              <span class="text-lg">↗</span>
+              Nâng VIP
+            </a>
+          )
+        }
+        {
+          user?.isAdmin && (
+            <a href="/admin" class={mobileNavClass('/admin')}>
+              <span class="text-lg">⚙</span>
+              Quản trị
+            </a>
+          )
+        }
+      </nav>
+
+      <main>
+        <slot />
+      </main>
+
+      <footer class="mt-20 border-t border-edge py-10">
+        <div class="mx-auto flex max-w-7xl flex-col gap-3 px-4 text-xs text-slate-500 sm:px-6">
+          <div class="flex items-center justify-between">
+            <span>© 2026 OnlyHeo</span>
+            <span>Build with Astro SSR + Drizzle ORM</span>
+          </div>
+          <p>
+            Mọi tài khoản, bình luận và bé heo trong này đều là hư cấu.
+          </p>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

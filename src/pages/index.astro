@@ -1,16 +1,105 @@
 ---
+import VideoCard from '../components/VideoCard.astro';
+import Layout from '../layouts/Layout.astro';
+import { getPublicVideos } from '../lib/queries';
+
+const user = Astro.locals.user;
+const query = Astro.url.searchParams.get('q')?.trim() ?? '';
+const videos = await getPublicVideos(query);
+const premiumUser = Boolean(user?.isPremium || user?.isAdmin);
 ---
 
-<html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
-		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
-	</head>
-	<body>
-		<h1>Astro</h1>
-	</body>
-</html>
+<Layout>
+  <section class="relative overflow-hidden border-b border-edge bg-white">
+    <div
+      class="absolute inset-0 bg-[radial-gradient(circle_at_70%_25%,rgba(0,175,240,.18),transparent_40%)]"
+    >
+    </div>
+    <div
+      class="relative mx-auto grid max-w-7xl gap-10 px-4 py-16 sm:px-6 lg:grid-cols-[1.15fr_.85fr] lg:py-24"
+    >
+      <div class="max-w-2xl">
+        <span
+          class="rounded-full border border-brand/30 bg-brand/10 px-3 py-1 text-xs font-bold uppercase tracking-widest text-brand"
+        >
+          Phim heo đúng nghĩa đen · Không che, không cắt
+        </span>
+        <h1
+          class="mt-6 text-4xl font-extrabold leading-tight text-slate-900 sm:text-6xl"
+        >
+          Heo nóng, mũm mĩm,
+          <br />
+          <span class="text-brand">và không mặc gì cả.</span>
+        </h1>
+        <p class="mt-5 max-w-xl text-lg leading-8 text-slate-600">
+          Da hồng ửng, mũi ướt lấp lánh, tiếng thở phì phò và những cảnh giường
+          chiếu quay cận. Cứ vào, đừng ngại.
+        </p>
+        <div class="mt-8 flex gap-3">
+          <a href="#library" class="btn-primary px-6 py-3"> Xem heo ngay </a>
+          <a href="/premium" class="btn-ghost px-6 py-3"> Khám phá Heo VIP </a>
+        </div>
+      </div>
+
+      <div class="relative hidden min-h-72 lg:block">
+        <div
+          class="absolute left-10 top-1 h-52 w-72 rotate-[-6deg] rounded-2xl bg-gradient-to-br from-[#bde9ff] to-[#ffb3ce] shadow-2xl"
+        >
+          <span class="grid h-full place-items-center text-8xl"> 🐷 </span>
+        </div>
+        <div
+          class="absolute bottom-0 right-4 h-52 w-72 rotate-[5deg] rounded-2xl bg-gradient-to-br from-[#00aff0] to-[#2864dc] shadow-2xl"
+        >
+          <span class="grid h-full place-items-center text-8xl"> 🐽 </span>
+          <span
+            class="absolute right-3 top-3 rounded bg-white px-2 py-1 text-xs font-bold text-brand"
+          >
+            HEO VIP
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="library" class="mx-auto max-w-7xl px-4 py-14 sm:px-6">
+    <div class="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+      <div>
+        <p class="text-xs font-bold uppercase tracking-widest text-brand">
+          Mới cập nhật đêm nay
+        </p>
+        <h2 class="mt-2 text-3xl font-bold text-slate-900">Heo đang nóng</h2>
+      </div>
+      <form
+        method="GET"
+        action="/#library"
+        class="flex w-full max-w-md gap-2"
+      >
+        <input
+          name="q"
+          value={query}
+          class="input"
+          placeholder="Tìm gu heo của bạn…"
+          aria-label="Tìm video"
+          maxlength={100}
+        />
+        <button class="btn-primary shrink-0" type="submit"> Tìm kiếm </button>
+      </form>
+    </div>
+
+    <div class="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {
+        videos.map((video) => (
+          <VideoCard video={video} premiumUser={premiumUser} />
+        ))
+      }
+    </div>
+
+    {
+      videos.length === 0 && (
+        <div class="card mt-8 py-16 text-center text-slate-500">
+          Không có bé heo nào hợp gu “{query}”.
+        </div>
+      )
+    }
+  </section>
+</Layout>

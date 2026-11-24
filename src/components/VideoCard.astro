@@ -1,0 +1,73 @@
+---
+import type { PublicVideo } from '../db/schema';
+
+interface Props {
+  video: PublicVideo;
+  premiumUser: boolean;
+}
+
+const { video, premiumUser } = Astro.props;
+const locked = video.isPremiumOnly && !premiumUser;
+
+const compactNumber = new Intl.NumberFormat('vi-VN', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+---
+
+<a
+  href={`/videos/${video.id}`}
+  class="group overflow-hidden rounded-xl border border-edge bg-panel shadow-sm transition hover:-translate-y-1 hover:border-brand hover:shadow-lg"
+>
+  <div
+    class="relative grid aspect-video place-items-center overflow-hidden"
+    style={`background: linear-gradient(135deg, ${video.posterFrom}, ${video.posterTo});`}
+  >
+    <span
+      class={`text-7xl drop-shadow-xl transition duration-500 group-hover:scale-110 ${
+        locked ? 'premium-locked' : ''
+      }`}
+    >
+      {video.emoji}
+    </span>
+    <img
+      src={video.thumbnailUrl}
+      alt=""
+      loading="lazy"
+      class={`absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-105 ${
+        locked ? 'premium-locked' : ''
+      }`}
+    />
+    <span class="absolute bottom-2 right-2 rounded bg-black/75 px-1.5 py-0.5 text-xs text-white">
+      {video.duration}
+    </span>
+    {
+      video.isPremiumOnly && (
+        <span class="absolute left-2 top-2 rounded bg-brand px-2 py-1 text-[10px] font-extrabold uppercase tracking-wider text-white">
+          VIP
+        </span>
+      )
+    }
+    {
+      locked && (
+        <div class="absolute inset-0 grid place-items-center bg-black/25">
+          <span class="grid h-11 w-11 place-items-center rounded-full border border-white/30 bg-black/60 text-xl">
+            🔒
+          </span>
+        </div>
+      )
+    }
+  </div>
+  <div class="p-4">
+    <h3 class="line-clamp-1 font-semibold text-slate-900 group-hover:text-brand">
+      {video.title}
+    </h3>
+    <p class="mt-1 line-clamp-2 text-sm leading-6 text-slate-600">
+      {video.description}
+    </p>
+    <div class="mt-3 flex items-center justify-between text-xs text-slate-500">
+      <span>{compactNumber.format(video.views)} lượt xem</span>
+      <span>{new Date(video.createdAt).toLocaleDateString('vi-VN')}</span>
+    </div>
+  </div>
+</a>
