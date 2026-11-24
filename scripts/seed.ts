@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db, pool } from '../src/db';
 import { comments, users, videos } from '../src/db/schema';
@@ -149,7 +150,7 @@ async function seed() {
     {
       username: 'me_heo_hong',
       email: 'linh@onlyheo.vn',
-      password: requireEnv('SEED_USER_LINH_PASSWORD'),
+      password: crypto.randomBytes(24).toString('hex'),
       bio: 'Mê heo hồng, bánh ngọt và những chiếc mũ tí hon.',
       isPremium: false,
       isAdmin: false,
@@ -157,7 +158,7 @@ async function seed() {
     {
       username: 'bac_si_heo',
       email: 'minh@onlyheo.vn',
-      password: requireEnv('SEED_USER_MINH_PASSWORD'),
+      password: crypto.randomBytes(24).toString('hex'),
       bio: 'Bác sĩ thú y, chuyên chăm sóc những bạn heo đáng yêu.',
       isPremium: true,
       isAdmin: false,
@@ -165,7 +166,7 @@ async function seed() {
     {
       username: 'heo_phuot_thu',
       email: 'an@onlyheo.vn',
-      password: requireEnv('SEED_USER_AN_PASSWORD'),
+      password: crypto.randomBytes(24).toString('hex'),
       bio: 'Chụp ảnh những chú heo trong các chuyến đi khắp Việt Nam.',
       isPremium: true,
       isAdmin: false,
