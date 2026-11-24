@@ -1,65 +1,110 @@
 ---
 import crypto from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
+import TurnstileWidget from '../components/TurnstileWidget.astro';
 import { db } from '../db';
-import { payments, users } from '../db/schema';
+import { payments } from '../db/schema';
 import Layout from '../layouts/Layout.astro';
+import { logSecurityEvent } from '../lib/audit';
+import { parseFormData } from '../lib/http';
+import { getLatestPendingPaymentForUser } from '../lib/queries';
+import { consumeRateLimit, getClientKey } from '../lib/rateLimit';
+import { verifyTurnstileToken } from '../lib/turnstile';
 
 const user = Astro.locals.user;
 if (!user) {
   return Astro.redirect('/login?from=/checkout');
 }
 
-let complete = user.isPremium || Astro.url.searchParams.get('complete') === '1';
+const VIP_AMOUNT_VND = 169000;
+
+// Entitlement is strictly derived from server DB state (never query params)
+const complete = user.isPremium;
 let paymentError = '';
-let cardNumber = '4242 4242 4242 4242';
-let expiry = '12/30';
-let cvc = '123';
 
 if (Astro.request.method === 'POST' && !user.isPremium) {
-  const formData = await Astro.request.formData();
-  cardNumber = (formData.get('cardNumber')?.toString() ?? '').trim();
-  expiry = (formData.get('expiry')?.toString() ?? '').trim();
-  cvc = (formData.get('cvc')?.toString() ?? '').trim();
-
-  const cardDigits = cardNumber.replace(/\s/g, '');
-  if (!/^\d{16}$/.test(cardDigits)) {
-    paymentError = 'Số thẻ phải gồm 16 chữ số.';
-  } else if (!/^(0[1-9]|1[0-2])\/\d{2}$/.test(expiry)) {
-    paymentError = 'Ngày hết hạn phải có dạng MM/YY.';
-  } else if (!/^\d{3,4}$/.test(cvc)) {
-    paymentError = 'CVC phải gồm 3 hoặc 4 chữ số.';
+  const formData = await parseFormData(Astro.request);
+  if (!formData) {
+    Astro.response.status = 400;
+    paymentError = 'Yêu cầu thanh toán không hợp lệ.';
   } else {
-    // Server-side payment verification & entitlement grant using server-only PAYMENT_SECRET
-    const paymentSecret = process.env.PAYMENT_SECRET;
-    if (!paymentSecret) {
-      throw new Error('PAYMENT_SECRET environment variable is required');
-    }
-
-    const amountVnd = 169000;
-    const cardLast4 = cardDigits.slice(-4);
-    const receiptSignature = crypto
-      .createHmac('sha256', paymentSecret)
-      .update(`${user.id}:${amountVnd}:${cardLast4}:${Date.now()}`)
-      .digest('hex');
-
-    await db.transaction(async (tx) => {
-      await tx.insert(payments).values({
+    const rate = await consumeRateLimit('checkoutUser', user.id);
+    if (!rate.allowed) {
+      Astro.response.status = 429;
+      Astro.response.headers.set('Retry-After', String(rate.retryAfterSeconds));
+      logSecurityEvent('auth.rate_limited', {
+        route: '/checkout',
         userId: user.id,
-        amountVnd,
-        cardLast4,
-        receiptSignature,
-        status: 'paid',
       });
-      await tx
-        .update(users)
-        .set({ isPremium: true })
-        .where(eq(users.id, user.id));
-    });
+      paymentError = `Quá nhiều yêu cầu thanh toán. Vui lòng thử lại sau ${rate.retryAfterSeconds} giây.`;
+    } else {
+      const turnstile = await verifyTurnstileToken({
+        token: formData.get('cf-turnstile-response')?.toString(),
+        remoteIp: getClientKey(Astro.clientAddress),
+        expectedAction: 'checkout',
+      });
 
-    return Astro.redirect('/checkout?complete=1');
+      if (!turnstile.success) {
+        Astro.response.status = 403;
+        paymentError =
+          'Xác minh chống bot (Turnstile) không thành công. Vui lòng thử lại.';
+      } else {
+        const paymentSecret = process.env.PAYMENT_SECRET;
+        if (!paymentSecret || paymentSecret.length < 24) {
+          throw new Error(
+            'PAYMENT_SECRET must be set and at least 24 characters long',
+          );
+        }
+
+        // Reuse an existing pending order for this user or create a new pending payment intent.
+        // Raw PAN/CVC are never accepted by this server; entitlement is granted ONLY when
+        // POST /api/payments/webhook receives a cryptographically signed provider confirmation.
+        const existingPending = await db
+          .select({ id: payments.id })
+          .from(payments)
+          .where(
+            and(eq(payments.userId, user.id), eq(payments.status, 'pending')),
+          )
+          .limit(1);
+
+        if (!existingPending[0]) {
+          const intentNonce = crypto.randomBytes(16).toString('hex');
+          const receiptSignature = crypto
+            .createHmac('sha256', paymentSecret)
+            .update(`${user.id}:${VIP_AMOUNT_VND}:${intentNonce}`)
+            .digest('hex');
+
+          const [created] = await db
+            .insert(payments)
+            .values({
+              userId: user.id,
+              amountVnd: VIP_AMOUNT_VND,
+              cardLast4: 'hosted',
+              receiptSignature,
+              status: 'pending',
+            })
+            .returning({ id: payments.id });
+
+          if (created) {
+            logSecurityEvent('payment.intent_created', {
+              userId: user.id,
+              paymentId: created.id,
+              amountVnd: VIP_AMOUNT_VND,
+            });
+          }
+        }
+
+        return Astro.redirect('/checkout');
+      }
+    }
   }
 }
+
+const latestPayment = !complete
+  ? await getLatestPendingPaymentForUser(user.id)
+  : undefined;
+const pendingPayment =
+  latestPayment?.status === 'pending' ? latestPayment : undefined;
 
 const benefits = [
   'Toàn bộ video độc quyền, kèm bản dựng của đạo diễn',
@@ -68,7 +113,10 @@ const benefits = [
 ];
 ---
 
-<Layout title="Nâng cấp Heo VIP · OnlyHeo">
+<Layout
+  title="Nâng cấp Heo VIP · OnlyHeo"
+  loadTurnstile={!complete && !pendingPayment}
+>
   {
     complete ? (
       <div class="mx-auto grid min-h-[65vh] max-w-xl place-items-center px-4 text-center">
@@ -78,7 +126,7 @@ const benefits = [
             Đã mở khóa Heo VIP
           </h1>
           <p class="mt-3 text-slate-600">
-            Thanh toán đã được xác thực phía máy chủ và cấp quyền thành công.
+            Quyền Heo VIP của tài khoản đã được xác thực phía máy chủ.
           </p>
           <a href="/" class="btn-primary mt-7">
             Xem phim Heo VIP
@@ -87,7 +135,7 @@ const benefits = [
       </div>
     ) : (
       <div class="mx-auto max-w-5xl px-4 py-14 sm:px-6">
-        <div class="grid gap-8 lg:grid-cols-[1fr_380px]">
+        <div class="grid gap-8 lg:grid-cols-[1fr_400px]">
           <div>
             <p class="text-xs font-bold uppercase tracking-widest text-brand">
               OnlyHeo VIP
@@ -111,7 +159,7 @@ const benefits = [
             </ul>
           </div>
 
-          <form method="POST" action="/checkout" class="card p-6">
+          <div class="card p-6">
             <div class="flex items-start justify-between">
               <div>
                 <p class="text-sm font-semibold text-slate-900">
@@ -125,66 +173,55 @@ const benefits = [
               </p>
             </div>
             <div class="my-6 border-t border-edge" />
-            <div>
-              <label for="card" class="label">
-                Số thẻ
-              </label>
-              <input
-                id="card"
-                name="cardNumber"
-                class="input"
-                value={cardNumber}
-                inputmode="numeric"
-                autocomplete="cc-number"
-                maxlength={19}
-                required
-              />
-            </div>
-            <div class="mt-4 grid grid-cols-2 gap-3">
-              <div>
-                <label for="expiry" class="label">
-                  Hết hạn
-                </label>
-                <input
-                  id="expiry"
-                  name="expiry"
-                  class="input"
-                  value={expiry}
-                  inputmode="numeric"
-                  autocomplete="cc-exp"
-                  placeholder="MM/YY"
-                  maxlength={5}
-                  required
-                />
+
+            {pendingPayment ? (
+              <div class="space-y-4">
+                <div class="rounded-lg border border-brand/30 bg-brand/5 p-4">
+                  <p class="text-xs font-bold uppercase tracking-wider text-brand">
+                    Đơn thanh toán đang chờ xác nhận
+                  </p>
+                  <p class="mt-2 text-xs text-slate-600">
+                    Mã đơn hàng:
+                  </p>
+                  <p class="mt-1 break-all font-mono text-xs text-slate-900">
+                    {pendingPayment.id}
+                  </p>
+                  <p class="mt-3 text-xs leading-5 text-slate-600">
+                    Quyền Heo VIP chỉ được kích hoạt sau khi cổng thanh toán gửi
+                    webhook có chữ ký HMAC hợp lệ tới{' '}
+                    <code class="font-mono text-slate-800">
+                      POST /api/payments/webhook
+                    </code>
+                    .
+                  </p>
+                </div>
+                <a href="/checkout" class="btn-ghost w-full py-2.5 text-center">
+                  Kiểm tra trạng thái thanh toán
+                </a>
               </div>
-              <div>
-                <label for="cvc" class="label">
-                  CVC
-                </label>
-                <input
-                  id="cvc"
-                  name="cvc"
-                  class="input"
-                  value={cvc}
-                  inputmode="numeric"
-                  autocomplete="cc-csc"
-                  maxlength={4}
-                  required
-                />
-              </div>
-            </div>
-            {paymentError && (
-              <p class="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">
-                {paymentError}
-              </p>
+            ) : (
+              <form method="POST" action="/checkout" class="space-y-4">
+                <p class="text-xs leading-5 text-slate-600">
+                  Máy chủ không bao giờ thu thập trực tiếp số thẻ hoặc mã CVC
+                  (tuân thủ phạm vi PCI-DSS). Bấm nút bên dưới để tạo đơn thanh
+                  toán ở trạng thái chờ xác thực từ cổng thanh toán.
+                </p>
+                <TurnstileWidget action="checkout" />
+                {paymentError && (
+                  <p class="rounded-lg bg-red-50 p-3 text-sm text-red-600">
+                    {paymentError}
+                  </p>
+                )}
+                <button type="submit" class="btn-primary w-full py-3">
+                  Tạo đơn thanh toán Heo VIP
+                </button>
+              </form>
             )}
-            <button type="submit" class="btn-primary mt-6 w-full py-3">
-              Bắt đầu trải nghiệm Heo VIP
-            </button>
+
             <p class="mt-4 text-center text-[10px] leading-4 text-slate-600">
-              Môi trường demo · Xác thực thanh toán phía máy chủ
+              Cấp quyền độc quyền qua webhook ký HMAC-SHA256 phía máy chủ
             </p>
-          </form>
+          </div>
         </div>
       </div>
     )

@@ -1,5 +1,6 @@
 ---
 import type { PublicVideo } from '../db/schema';
+import { sanitizeHexColor } from '../lib/validation';
 
 interface Props {
   video: PublicVideo;
@@ -8,6 +9,8 @@ interface Props {
 
 const { video, premiumUser } = Astro.props;
 const locked = video.isPremiumOnly && !premiumUser;
+const posterFrom = sanitizeHexColor(video.posterFrom, '#bde9ff');
+const posterTo = sanitizeHexColor(video.posterTo, '#ffb3ce');
 
 const compactNumber = new Intl.NumberFormat('vi-VN', {
   notation: 'compact',
@@ -21,7 +24,7 @@ const compactNumber = new Intl.NumberFormat('vi-VN', {
 >
   <div
     class="relative grid aspect-video place-items-center overflow-hidden"
-    style={`background: linear-gradient(135deg, ${video.posterFrom}, ${video.posterTo});`}
+    style={`background: linear-gradient(135deg, ${posterFrom}, ${posterTo});`}
   >
     <span
       class={`text-7xl drop-shadow-xl transition duration-500 group-hover:scale-110 ${

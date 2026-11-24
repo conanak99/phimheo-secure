@@ -4,7 +4,8 @@ import Layout from '../layouts/Layout.astro';
 import { getPublicVideos } from '../lib/queries';
 
 const user = Astro.locals.user;
-const query = Astro.url.searchParams.get('q')?.trim() ?? '';
+const rawQuery = Astro.url.searchParams.get('q')?.trim() ?? '';
+const query = rawQuery.slice(0, 100);
 const videos = await getPublicVideos(query);
 const premiumUser = Boolean(user?.isPremium || user?.isAdmin);
 ---

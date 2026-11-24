@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { APIRoute } from 'astro';
@@ -19,18 +20,33 @@ export const GET: APIRoute = async ({ params, locals, request }) => {
     return new Response('Premium subscription required', { status: 403 });
   }
 
-  // Prevent path traversal by forcing basename and checking resolved prefix
+  // Prevent path traversal and symlink escapes by resolving real paths asynchronously
   const safeName = path.basename(video.videoFilename);
-  const filePath = path.resolve(STORAGE_DIR, safeName);
-  if (!filePath.startsWith(STORAGE_DIR + path.sep)) {
+  const candidatePath = path.resolve(STORAGE_DIR, safeName);
+  if (!candidatePath.startsWith(STORAGE_DIR + path.sep)) {
     return new Response('Forbidden', { status: 403 });
   }
 
-  if (!fs.existsSync(filePath)) {
+  let realStorageDir: string;
+  let realFilePath: string;
+  let stat: fs.Stats;
+  try {
+    [realStorageDir, realFilePath] = await Promise.all([
+      fsp.realpath(STORAGE_DIR),
+      fsp.realpath(candidatePath),
+    ]);
+    if (!realFilePath.startsWith(realStorageDir + path.sep)) {
+      return new Response('Forbidden', { status: 403 });
+    }
+    stat = await fsp.stat(realFilePath);
+  } catch {
     return new Response('Media file missing', { status: 404 });
   }
 
-  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) {
+    return new Response('Media file missing', { status: 404 });
+  }
+
   const fileSize = stat.size;
   const range = request.headers.get('range');
   const cacheControl = video.isPremiumOnly
@@ -39,17 +55,33 @@ export const GET: APIRoute = async ({ params, locals, request }) => {
 
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
-    if (!match) {
+    if (!match || (!match[1] && !match[2])) {
       return new Response('Invalid Range', {
         status: 416,
         headers: { 'Content-Range': `bytes */${fileSize}` },
       });
     }
 
-    const start = match[1] ? Number.parseInt(match[1], 10) : 0;
-    const end = match[2]
-      ? Math.min(Number.parseInt(match[2], 10), fileSize - 1)
-      : fileSize - 1;
+    let start: number;
+    let end: number;
+
+    if (!match[1] && match[2]) {
+      // RFC 9110 suffix-byte-range-spec: bytes=-N requests the last N bytes
+      const suffixLength = Number.parseInt(match[2], 10);
+      if (Number.isNaN(suffixLength) || suffixLength <= 0) {
+        return new Response('Range Not Satisfiable', {
+          status: 416,
+          headers: { 'Content-Range': `bytes */${fileSize}` },
+        });
+      }
+      start = Math.max(fileSize - suffixLength, 0);
+      end = fileSize - 1;
+    } else {
+      start = Number.parseInt(match[1], 10);
+      end = match[2]
+        ? Math.min(Number.parseInt(match[2], 10), fileSize - 1)
+        : fileSize - 1;
+    }
 
     if (
       Number.isNaN(start) ||
@@ -65,7 +97,10 @@ export const GET: APIRoute = async ({ params, locals, request }) => {
     }
 
     const chunkSize = end - start + 1;
-    const nodeStream = fs.createReadStream(filePath, { start, end });
+    const nodeStream = fs.createReadStream(realFilePath, { start, end });
+    nodeStream.on('error', () => {
+      nodeStream.destroy();
+    });
     const webStream = Readable.toWeb(nodeStream) as ReadableStream;
 
     return new Response(webStream, {
@@ -80,7 +115,10 @@ export const GET: APIRoute = async ({ params, locals, request }) => {
     });
   }
 
-  const nodeStream = fs.createReadStream(filePath);
+  const nodeStream = fs.createReadStream(realFilePath);
+  nodeStream.on('error', () => {
+    nodeStream.destroy();
+  });
   const webStream = Readable.toWeb(nodeStream) as ReadableStream;
 
   return new Response(webStream, {

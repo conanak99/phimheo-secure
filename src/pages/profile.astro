@@ -3,7 +3,11 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db';
 import { users } from '../db/schema';
 import Layout from '../layouts/Layout.astro';
+import { logSecurityEvent } from '../lib/audit';
+import { parseFormData } from '../lib/http';
 import { getPublicCommunityProfiles } from '../lib/queries';
+import { consumeRateLimit } from '../lib/rateLimit';
+import { bioSchema } from '../lib/validation';
 
 const user = Astro.locals.user;
 if (!user) {
@@ -15,19 +19,36 @@ let error = '';
 let bioValue = user.bio;
 
 if (Astro.request.method === 'POST') {
-  const formData = await Astro.request.formData();
-  const bio = (formData.get('bio')?.toString() ?? '').trim();
-  bioValue = bio;
-
-  if (bio.length > 500) {
-    error = 'Giới thiệu tối đa 500 ký tự.';
+  const formData = await parseFormData(Astro.request);
+  if (!formData) {
+    Astro.response.status = 400;
+    error = 'Yêu cầu biểu mẫu không hợp lệ.';
   } else {
-    // Only update `bio` for the authenticated user; never allow role/premium changes.
-    await db
-      .update(users)
-      .set({ bio })
-      .where(eq(users.id, user.id));
-    return Astro.redirect('/profile?saved=1');
+    const rate = await consumeRateLimit('profileUser', user.id);
+    if (!rate.allowed) {
+      Astro.response.status = 429;
+      Astro.response.headers.set('Retry-After', String(rate.retryAfterSeconds));
+      logSecurityEvent('auth.rate_limited', {
+        route: '/profile',
+        userId: user.id,
+      });
+      error = `Bạn cập nhật hồ sơ quá nhanh. Vui lòng thử lại sau ${rate.retryAfterSeconds} giây.`;
+    } else {
+      const rawBio = formData.get('bio')?.toString() ?? '';
+      bioValue = rawBio.trim();
+
+      const parsed = bioSchema.safeParse(rawBio);
+      if (!parsed.success) {
+        error = parsed.error.issues[0]?.message ?? 'Giới thiệu không hợp lệ.';
+      } else {
+        // Only update `bio` for the authenticated user; never allow role/premium changes.
+        await db
+          .update(users)
+          .set({ bio: parsed.data })
+          .where(eq(users.id, user.id));
+        return Astro.redirect('/profile?saved=1');
+      }
+    }
   }
 }
 

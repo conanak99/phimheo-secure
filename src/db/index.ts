@@ -12,11 +12,17 @@ const globalForDb = globalThis as unknown as {
   __pgPool?: pg.Pool;
 };
 
+const useSsl = process.env.DATABASE_SSL === 'true';
+
 export const pool =
   globalForDb.__pgPool ??
   new pg.Pool({
     connectionString,
     max: 10,
+    connectionTimeoutMillis: 5_000,
+    idleTimeoutMillis: 30_000,
+    statement_timeout: 10_000,
+    ...(useSsl ? { ssl: { rejectUnauthorized: true } } : {}),
   });
 
 if (process.env.NODE_ENV !== 'production') {

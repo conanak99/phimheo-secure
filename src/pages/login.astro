@@ -1,10 +1,22 @@
 ---
 import { eq } from 'drizzle-orm';
+import TurnstileWidget from '../components/TurnstileWidget.astro';
 import { db } from '../db';
 import { users } from '../db/schema';
 import Layout from '../layouts/Layout.astro';
+import { logSecurityEvent } from '../lib/audit';
 import { createSession, sanitizeReturnTo } from '../lib/auth';
-import { hashPassword, verifyPassword } from '../lib/password';
+import { parseFormData } from '../lib/http';
+import {
+  hashPassword,
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  needsPasswordRehash,
+  verifyPassword,
+} from '../lib/password';
+import { consumeRateLimit, getClientKey, resetRateLimit } from '../lib/rateLimit';
+import { verifyTurnstileToken } from '../lib/turnstile';
+import { loginSchema, registerSchema } from '../lib/validation';
 
 const returnTo = sanitizeReturnTo(Astro.url.searchParams.get('from'), '/profile');
 
@@ -19,72 +31,178 @@ let emailValue = '';
 let usernameValue = '';
 
 if (Astro.request.method === 'POST') {
-  const formData = await Astro.request.formData();
-  const submittedMode = formData.get('mode')?.toString();
-  mode = submittedMode === 'register' ? 'register' : 'login';
-
-  const submittedReturnTo = sanitizeReturnTo(
-    formData.get('from')?.toString(),
-    '/profile',
-  );
-  const email = (formData.get('email')?.toString() ?? '').trim().toLowerCase();
-  const password = formData.get('password')?.toString() ?? '';
-  const username = (formData.get('username')?.toString() ?? '').trim();
-
-  emailValue = email;
-  usernameValue = username;
-
-  if (mode === 'login') {
-    const [existing] = await db
-      .select()
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
-
-    const valid =
-      existing && (await verifyPassword(password, existing.passwordHash));
-
-    if (!valid || !existing) {
-      error = 'Email hoặc mật khẩu không chính xác.';
-    } else {
-      await createSession(existing.id, Astro.cookies);
-      return Astro.redirect(submittedReturnTo);
-    }
+  const formData = await parseFormData(Astro.request);
+  if (!formData) {
+    Astro.response.status = 400;
+    error = 'Yêu cầu biểu mẫu không hợp lệ.';
   } else {
-    if (username.length < 2 || username.length > 40) {
-      error = 'Tên người dùng phải có từ 2 đến 40 ký tự.';
-    } else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      error = 'Email không hợp lệ.';
-    } else if (password.length < 6 || password.length > 128) {
-      error = 'Mật khẩu phải có từ 6 đến 128 ký tự.';
-    } else {
-      const [duplicate] = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.email, email))
-        .limit(1);
+    const submittedMode = formData.get('mode')?.toString();
+    mode = submittedMode === 'register' ? 'register' : 'login';
 
-      if (duplicate) {
-        error = 'Email này đã được đăng ký.';
+    const submittedReturnTo = sanitizeReturnTo(
+      formData.get('from')?.toString(),
+      '/profile',
+    );
+    const rawEmail = (formData.get('email')?.toString() ?? '').trim().toLowerCase();
+    const rawPassword = formData.get('password')?.toString() ?? '';
+    const rawUsername = (formData.get('username')?.toString() ?? '').trim();
+
+    emailValue = rawEmail.slice(0, 254);
+    usernameValue = rawUsername.slice(0, 40);
+
+    const clientIp = getClientKey(Astro.clientAddress);
+    const turnstileToken = formData.get('cf-turnstile-response')?.toString();
+
+    if (mode === 'login') {
+      const ipLimit = await consumeRateLimit('loginIp', clientIp);
+      const acctLimit = await consumeRateLimit(
+        'loginAccount',
+        `${clientIp}:${emailValue}`,
+      );
+
+      if (!ipLimit.allowed || !acctLimit.allowed) {
+        const retryAfter = Math.max(
+          ipLimit.retryAfterSeconds,
+          acctLimit.retryAfterSeconds,
+        );
+        Astro.response.status = 429;
+        Astro.response.headers.set('Retry-After', String(retryAfter));
+        logSecurityEvent('auth.rate_limited', {
+          route: '/login',
+          mode: 'login',
+          ip: clientIp,
+        });
+        error = `Quá nhiều lần thử đăng nhập. Vui lòng thử lại sau ${retryAfter} giây.`;
       } else {
-        const passwordHash = await hashPassword(password);
-        const [created] = await db
-          .insert(users)
-          .values({
-            username,
-            email,
-            passwordHash,
-            bio: '',
-            isPremium: false,
-            isAdmin: false,
-          })
-          .returning({ id: users.id });
+        const turnstile = await verifyTurnstileToken({
+          token: turnstileToken,
+          remoteIp: clientIp,
+          expectedAction: 'login',
+        });
 
-        if (created) {
-          await createSession(created.id, Astro.cookies);
-          return Astro.redirect(submittedReturnTo);
+        if (!turnstile.success) {
+          Astro.response.status = 403;
+          error = 'Xác minh chống bot (Turnstile) không thành công. Vui lòng thử lại.';
+        } else {
+          const parsed = loginSchema.safeParse({
+            email: rawEmail,
+            password: rawPassword,
+          });
+
+          if (!parsed.success) {
+            error = 'Email hoặc mật khẩu không chính xác.';
+          } else {
+            const { email, password } = parsed.data;
+            const [existing] = await db
+              .select()
+              .from(users)
+              .where(eq(users.email, email))
+              .limit(1);
+
+            // Always invoke verifyPassword (even when existing is undefined) to equalize timing
+            const valid = await verifyPassword(
+              password,
+              existing?.passwordHash ?? null,
+            );
+
+            if (!valid || !existing) {
+              logSecurityEvent('auth.login_failed', {
+                ip: clientIp,
+                userExists: Boolean(existing),
+              });
+              error = 'Email hoặc mật khẩu không chính xác.';
+            } else {
+              if (needsPasswordRehash(existing.passwordHash)) {
+                const upgradedHash = await hashPassword(password);
+                await db
+                  .update(users)
+                  .set({ passwordHash: upgradedHash })
+                  .where(eq(users.id, existing.id));
+              }
+              await resetRateLimit('loginAccount', `${clientIp}:${emailValue}`);
+              await createSession(existing.id, Astro.cookies, Astro.url);
+              logSecurityEvent('auth.login_success', {
+                userId: existing.id,
+                ip: clientIp,
+              });
+              return Astro.redirect(submittedReturnTo);
+            }
+          }
         }
-        error = 'Không thể tạo tài khoản.';
+      }
+    } else {
+      const regLimit = await consumeRateLimit('registerIp', clientIp);
+      if (!regLimit.allowed) {
+        Astro.response.status = 429;
+        Astro.response.headers.set(
+          'Retry-After',
+          String(regLimit.retryAfterSeconds),
+        );
+        logSecurityEvent('auth.rate_limited', {
+          route: '/login',
+          mode: 'register',
+          ip: clientIp,
+        });
+        error = `Quá nhiều lượt đăng ký. Vui lòng thử lại sau ${regLimit.retryAfterSeconds} giây.`;
+      } else {
+        const turnstile = await verifyTurnstileToken({
+          token: turnstileToken,
+          remoteIp: clientIp,
+          expectedAction: 'register',
+        });
+
+        if (!turnstile.success) {
+          Astro.response.status = 403;
+          error = 'Xác minh chống bot (Turnstile) không thành công. Vui lòng thử lại.';
+        } else {
+          const parsed = registerSchema.safeParse({
+            username: rawUsername,
+            email: rawEmail,
+            password: rawPassword,
+          });
+
+          if (!parsed.success) {
+            error =
+              parsed.error.issues[0]?.message ?? 'Thông tin đăng ký không hợp lệ.';
+          } else {
+            const { username, email, password } = parsed.data;
+            const [duplicate] = await db
+              .select({ id: users.id })
+              .from(users)
+              .where(eq(users.email, email))
+              .limit(1);
+
+            if (duplicate) {
+              // Avoid leaking whether an email is registered
+              logSecurityEvent('auth.register_conflict', { ip: clientIp });
+              error =
+                'Không thể tạo tài khoản với thông tin này. Vui lòng kiểm tra lại hoặc đăng nhập.';
+            } else {
+              const passwordHash = await hashPassword(password);
+              const [created] = await db
+                .insert(users)
+                .values({
+                  username,
+                  email,
+                  passwordHash,
+                  bio: '',
+                  isPremium: false,
+                  isAdmin: false,
+                })
+                .returning({ id: users.id });
+
+              if (created) {
+                await createSession(created.id, Astro.cookies, Astro.url);
+                logSecurityEvent('auth.register_success', {
+                  userId: created.id,
+                  ip: clientIp,
+                });
+                return Astro.redirect(submittedReturnTo);
+              }
+              error = 'Không thể tạo tài khoản.';
+            }
+          }
+        }
       }
     }
   }
@@ -93,7 +211,10 @@ if (Astro.request.method === 'POST') {
 const fromQuery = returnTo !== '/profile' ? `&from=${encodeURIComponent(returnTo)}` : '';
 ---
 
-<Layout title={mode === 'login' ? 'Đăng nhập · OnlyHeo' : 'Đăng ký · OnlyHeo'}>
+<Layout
+  title={mode === 'login' ? 'Đăng nhập · OnlyHeo' : 'Đăng ký · OnlyHeo'}
+  loadTurnstile={true}
+>
   <div class="mx-auto grid min-h-[72vh] max-w-5xl place-items-center px-4 py-14">
     <div
       class="grid w-full overflow-hidden rounded-2xl border border-edge bg-panel shadow-2xl md:grid-cols-2"
@@ -173,6 +294,7 @@ const fromQuery = returnTo !== '/profile' ? `&from=${encodeURIComponent(returnTo
               type="email"
               class="input"
               value={emailValue}
+              maxlength={254}
               autocomplete="email"
               required
             />
@@ -185,11 +307,12 @@ const fromQuery = returnTo !== '/profile' ? `&from=${encodeURIComponent(returnTo
               type="password"
               class="input"
               autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
-              minlength={6}
-              maxlength={128}
+              minlength={mode === 'register' ? MIN_PASSWORD_LENGTH : 1}
+              maxlength={MAX_PASSWORD_LENGTH}
               required
             />
           </div>
+          <TurnstileWidget action={mode} />
           {
             error && (
               <p class="rounded-lg bg-red-50 p-3 text-sm text-red-600">

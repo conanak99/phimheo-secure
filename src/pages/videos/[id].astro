@@ -1,12 +1,18 @@
 ---
+import TurnstileWidget from '../../components/TurnstileWidget.astro';
 import { db } from '../../db';
 import { comments as commentsTable } from '../../db/schema';
 import Layout from '../../layouts/Layout.astro';
+import { logSecurityEvent } from '../../lib/audit';
+import { parseFormData } from '../../lib/http';
 import {
   getCommentsForVideo,
   getFullVideoById,
   getPublicVideoById,
 } from '../../lib/queries';
+import { consumeRateLimit, getClientKey } from '../../lib/rateLimit';
+import { verifyTurnstileToken } from '../../lib/turnstile';
+import { commentSchema } from '../../lib/validation';
 
 const id = Astro.params.id ?? '';
 const user = Astro.locals.user;
@@ -22,20 +28,49 @@ if (Astro.request.method === 'POST' && video) {
     return Astro.redirect(`/login?from=${encodeURIComponent(Astro.url.pathname)}`);
   }
 
-  const formData = await Astro.request.formData();
-  const content = formData.get('content')?.toString().trim() ?? '';
-
-  if (!content) {
-    commentError = 'Vui lòng nhập nội dung bình luận.';
-  } else if (content.length > 1000) {
-    commentError = 'Bình luận tối đa 1000 ký tự.';
+  const formData = await parseFormData(Astro.request);
+  if (!formData) {
+    Astro.response.status = 400;
+    commentError = 'Yêu cầu bình luận không hợp lệ.';
   } else {
-    await db.insert(commentsTable).values({
-      videoId: video.id,
-      userId: user.id,
-      content,
-    });
-    return Astro.redirect(`/videos/${video.id}#comments`);
+    const rate = await consumeRateLimit('commentUser', user.id);
+    if (!rate.allowed) {
+      Astro.response.status = 429;
+      Astro.response.headers.set('Retry-After', String(rate.retryAfterSeconds));
+      logSecurityEvent('auth.rate_limited', {
+        route: '/videos/[id]',
+        userId: user.id,
+      });
+      commentError = `Bạn bình luận quá nhanh. Vui lòng thử lại sau ${rate.retryAfterSeconds} giây.`;
+    } else {
+      const turnstile = await verifyTurnstileToken({
+        token: formData.get('cf-turnstile-response')?.toString(),
+        remoteIp: getClientKey(Astro.clientAddress),
+        expectedAction: 'comment',
+      });
+
+      if (!turnstile.success) {
+        Astro.response.status = 403;
+        commentError =
+          'Xác minh chống bot (Turnstile) không thành công. Vui lòng thử lại.';
+      } else {
+        const parsed = commentSchema.safeParse(
+          formData.get('content')?.toString() ?? '',
+        );
+
+        if (!parsed.success) {
+          commentError =
+            parsed.error.issues[0]?.message ?? 'Nội dung bình luận không hợp lệ.';
+        } else {
+          await db.insert(commentsTable).values({
+            videoId: video.id,
+            userId: user.id,
+            content: parsed.data,
+          });
+          return Astro.redirect(`/videos/${video.id}#comments`);
+        }
+      }
+    }
   }
 }
 
@@ -57,7 +92,10 @@ const adminVideoFilename =
     : null;
 ---
 
-<Layout title={video ? `${video.title} · OnlyHeo` : 'Video không tồn tại · OnlyHeo'}>
+<Layout
+  title={video ? `${video.title} · OnlyHeo` : 'Video không tồn tại · OnlyHeo'}
+  loadTurnstile={Boolean(video && user)}
+>
   {
     !video ? (
       <div class="mx-auto max-w-3xl px-4 py-20 text-center">
@@ -151,6 +189,8 @@ const adminVideoFilename =
                     value={video.title}
                     class="input w-64"
                     aria-label="Tên video mới"
+                    minlength={2}
+                    maxlength={160}
                     required
                   />
                   <button type="submit" class="btn-ghost">
@@ -193,7 +233,8 @@ const adminVideoFilename =
                   {commentError && (
                     <p class="mt-2 text-xs text-red-600">{commentError}</p>
                   )}
-                  <div class="mt-3 flex items-center justify-end">
+                  <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                    <TurnstileWidget action="comment" />
                     <button class="btn-primary" type="submit">
                       Đăng bình luận
                     </button>

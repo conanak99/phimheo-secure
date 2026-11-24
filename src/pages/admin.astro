@@ -1,38 +1,112 @@
 ---
 import { eq } from 'drizzle-orm';
+import TurnstileWidget from '../components/TurnstileWidget.astro';
 import { db } from '../db';
 import { users } from '../db/schema';
 import Layout from '../layouts/Layout.astro';
+import { logSecurityEvent } from '../lib/audit';
 import { createSession } from '../lib/auth';
-import { verifyPassword } from '../lib/password';
+import { parseFormData } from '../lib/http';
+import {
+  hashPassword,
+  MAX_PASSWORD_LENGTH,
+  needsPasswordRehash,
+  verifyPassword,
+} from '../lib/password';
+import { consumeRateLimit, getClientKey, resetRateLimit } from '../lib/rateLimit';
 import { getAdminDashboardData } from '../lib/queries';
+import { verifyTurnstileToken } from '../lib/turnstile';
+import { loginSchema } from '../lib/validation';
 
 let user = Astro.locals.user;
 let error = '';
 let emailValue = '';
 
 if (Astro.request.method === 'POST' && !user?.isAdmin) {
-  const formData = await Astro.request.formData();
-  const email = (formData.get('email')?.toString() ?? '').trim().toLowerCase();
-  const password = formData.get('password')?.toString() ?? '';
-  emailValue = email;
-
-  const [existing] = await db
-    .select()
-    .from(users)
-    .where(eq(users.email, email))
-    .limit(1);
-
-  const valid =
-    existing &&
-    existing.isAdmin &&
-    (await verifyPassword(password, existing.passwordHash));
-
-  if (!valid || !existing) {
-    error = 'Email hoặc mật khẩu quản trị không đúng.';
+  const formData = await parseFormData(Astro.request);
+  if (!formData) {
+    Astro.response.status = 400;
+    error = 'Yêu cầu biểu mẫu không hợp lệ.';
   } else {
-    await createSession(existing.id, Astro.cookies);
-    return Astro.redirect('/admin');
+    const rawEmail = (formData.get('email')?.toString() ?? '').trim().toLowerCase();
+    const rawPassword = formData.get('password')?.toString() ?? '';
+    emailValue = rawEmail.slice(0, 254);
+
+    const clientIp = getClientKey(Astro.clientAddress);
+    const turnstileToken = formData.get('cf-turnstile-response')?.toString();
+    const ipLimit = await consumeRateLimit('adminIp', clientIp);
+    const acctLimit = await consumeRateLimit(
+      'adminAccount',
+      `${clientIp}:${emailValue}`,
+    );
+
+    if (!ipLimit.allowed || !acctLimit.allowed) {
+      const retryAfter = Math.max(
+        ipLimit.retryAfterSeconds,
+        acctLimit.retryAfterSeconds,
+      );
+      Astro.response.status = 429;
+      Astro.response.headers.set('Retry-After', String(retryAfter));
+      logSecurityEvent('auth.rate_limited', {
+        route: '/admin',
+        ip: clientIp,
+      });
+      error = `Quá nhiều lần thử đăng nhập quản trị. Thử lại sau ${retryAfter} giây.`;
+    } else {
+      const turnstile = await verifyTurnstileToken({
+        token: turnstileToken,
+        remoteIp: clientIp,
+        expectedAction: 'admin-login',
+      });
+
+      if (!turnstile.success) {
+        Astro.response.status = 403;
+        error = 'Xác minh chống bot (Turnstile) không thành công. Vui lòng thử lại.';
+      } else {
+        const parsed = loginSchema.safeParse({
+          email: rawEmail,
+          password: rawPassword,
+        });
+
+        if (!parsed.success) {
+          error = 'Email hoặc mật khẩu quản trị không đúng.';
+        } else {
+          const { email, password } = parsed.data;
+          const [existing] = await db
+            .select()
+            .from(users)
+            .where(eq(users.email, email))
+            .limit(1);
+
+          // Always execute KDF even when missing or non-admin to prevent timing-based admin enumeration
+          const hashToVerify = existing?.isAdmin ? existing.passwordHash : null;
+          const valid = await verifyPassword(password, hashToVerify);
+
+          if (!valid || !existing?.isAdmin) {
+            logSecurityEvent('auth.admin_login_failed', {
+              ip: clientIp,
+            });
+            error = 'Email hoặc mật khẩu quản trị không đúng.';
+          } else {
+            if (needsPasswordRehash(existing.passwordHash)) {
+              const upgradedHash = await hashPassword(password);
+              await db
+                .update(users)
+                .set({ passwordHash: upgradedHash })
+                .where(eq(users.id, existing.id));
+            }
+            await resetRateLimit('adminAccount', `${clientIp}:${emailValue}`);
+            // createSession revokes any previous session bound to the caller's cookie
+            await createSession(existing.id, Astro.cookies, Astro.url);
+            logSecurityEvent('auth.admin_login_success', {
+              userId: existing.id,
+              ip: clientIp,
+            });
+            return Astro.redirect('/admin');
+          }
+        }
+      }
+    }
   }
 }
 
@@ -46,7 +120,7 @@ const tab: 'videos' | 'users' | 'comments' =
 const dashboard = user?.isAdmin ? await getAdminDashboardData() : null;
 ---
 
-<Layout title="Quản trị · OnlyHeo">
+<Layout title="Quản trị · OnlyHeo" loadTurnstile={!dashboard}>
   {
     !dashboard ? (
       <div class="mx-auto grid min-h-[72vh] max-w-md place-items-center px-4 py-14">
@@ -73,6 +147,7 @@ const dashboard = user?.isAdmin ? await getAdminDashboardData() : null;
               type="email"
               class="input"
               value={emailValue}
+              maxlength={254}
               autocomplete="email"
               required
             />
@@ -86,9 +161,13 @@ const dashboard = user?.isAdmin ? await getAdminDashboardData() : null;
               name="password"
               type="password"
               class="input"
+              maxlength={MAX_PASSWORD_LENGTH}
               autocomplete="current-password"
               required
             />
+          </div>
+          <div class="mt-4">
+            <TurnstileWidget action="admin-login" />
           </div>
           {error && (
             <p class="mt-4 rounded bg-red-50 p-3 text-sm text-red-600">

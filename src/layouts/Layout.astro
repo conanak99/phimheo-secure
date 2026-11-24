@@ -3,9 +3,13 @@ import '../styles/global.css';
 
 interface Props {
   title?: string;
+  loadTurnstile?: boolean;
 }
 
-const { title = 'OnlyHeo · Phim heo nóng nhất Việt Nam' } = Astro.props;
+const {
+  title = 'OnlyHeo · Phim heo nóng nhất Việt Nam',
+  loadTurnstile = false,
+} = Astro.props;
 const user = Astro.locals.user;
 const pathname = Astro.url.pathname;
 
@@ -39,6 +43,16 @@ const mobileNavClass = (href: string, exact = false) =>
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
+    {
+      loadTurnstile && (
+        <script
+          is:inline
+          src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+          async
+          defer
+        />
+      )
+    }
   </head>
   <body>
     <div class="min-h-screen pb-16 md:pb-0">

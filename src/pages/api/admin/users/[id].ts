@@ -2,6 +2,8 @@ import type { APIRoute } from 'astro';
 import { eq } from 'drizzle-orm';
 import { db } from '../../../../db';
 import { users } from '../../../../db/schema';
+import { logSecurityEvent } from '../../../../lib/audit';
+import { parseFormData } from '../../../../lib/http';
 import { isValidUuid } from '../../../../lib/queries';
 
 export const POST: APIRoute = async ({ params, locals, request, redirect }) => {
@@ -14,7 +16,10 @@ export const POST: APIRoute = async ({ params, locals, request, redirect }) => {
     return new Response('Invalid user ID', { status: 400 });
   }
 
-  const formData = await request.formData();
+  const formData = await parseFormData(request);
+  if (!formData) {
+    return new Response('Invalid form submission', { status: 400 });
+  }
   const action = formData.get('action')?.toString();
 
   const [target] = await db
@@ -32,10 +37,18 @@ export const POST: APIRoute = async ({ params, locals, request, redirect }) => {
   }
 
   if (action === 'toggle-premium') {
+    const nextPremium = !target.isPremium;
     await db
       .update(users)
-      .set({ isPremium: !target.isPremium })
+      .set({ isPremium: nextPremium })
       .where(eq(users.id, targetId));
+
+    logSecurityEvent('admin.user_toggle_premium', {
+      actorId: locals.user.id,
+      targetUserId: targetId,
+      isPremium: nextPremium,
+    });
+
     return redirect('/admin?tab=users');
   }
 
@@ -45,6 +58,12 @@ export const POST: APIRoute = async ({ params, locals, request, redirect }) => {
       return redirect('/admin?tab=users');
     }
     await db.delete(users).where(eq(users.id, targetId));
+
+    logSecurityEvent('admin.user_deleted', {
+      actorId: locals.user.id,
+      targetUserId: targetId,
+    });
+
     return redirect('/admin?tab=users');
   }
 

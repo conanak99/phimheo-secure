@@ -1,0 +1,21 @@
+---
+import { getTurnstileSiteKey } from '../lib/turnstile';
+
+interface Props {
+  action: string;
+  theme?: 'light' | 'dark' | 'auto';
+}
+
+const { action, theme = 'light' } = Astro.props;
+const siteKey = getTurnstileSiteKey();
+---
+
+<div class="pt-1">
+  <div
+    class="cf-turnstile"
+    data-sitekey={siteKey}
+    data-action={action}
+    data-theme={theme}
+  >
+  </div>
+</div>
